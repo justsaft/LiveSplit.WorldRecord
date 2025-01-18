@@ -53,23 +53,28 @@ public class WorldRecordComponent : IComponent
     public WorldRecordComponent(LiveSplitState state)
     {
         State = state;
+        RefreshInterval = TimeSpan.FromMinutes(5);
 
         Client = new SpeedrunComClient(userAgent: Updates.UpdateHelper.UserAgent, maxCacheElements: 0);
-
-        RefreshInterval = TimeSpan.FromMinutes(5);
         Cache = new GraphicsCache();
+        LocalTimeFormatter = new RegularTimeFormatter();
+        InternalComponent = new InfoTextComponent("World Record", TimeFormatConstants.DASH);
+
         TimeFormatter = new GeneralTimeFormatter()
         {
             NullFormat = NullFormat.ZeroWithAccuracy,
             DigitsFormat = DigitsFormat.SingleDigitMinutes,
-            Accuracy = TimeAccuracy.Milliseconds,
+            // Decimal places displayed on the component
+            // Should honestly not be hardcoded
+            Accuracy = TimeAccuracy.Seconds,
         };
-        LocalTimeFormatter = new RegularTimeFormatter();
-        InternalComponent = new InfoTextComponent("World Record", TimeFormatConstants.DASH);
+
         Settings = new WorldRecordSettings()
         {
             CurrentState = state
         };
+
+        Task.Factory.StartNew(RefreshWorldRecord); // Refresh component when it's initialized
     }
 
     public void Dispose()
@@ -80,12 +85,15 @@ public class WorldRecordComponent : IComponent
     {
         LastUpdate = TimeStamp.Now;
 
-        WorldRecord = null;
+        /* WorldRecord = null;
+        AllTies = null; */
 
         try
         {
-            if (State != null && State.Run != null
-                && State.Run.Metadata.Game != null && State.Run.Metadata.Category != null)
+            if (State != null &&
+                State.Run != null &&
+                State.Run.Metadata.Game != null &&
+                State.Run.Metadata.Category != null)
             {
                 IEnumerable<VariableValue> variableFilter = null;
                 if (Settings.FilterVariables || Settings.FilterSubcategories)
@@ -96,20 +104,32 @@ public class WorldRecordComponent : IComponent
                         {
                             return false;
                         }
-
-                        if (value.Variable.IsSubcategory)
+                        else if (value.Variable.IsSubcategory)
                         {
                             return Settings.FilterSubcategories;
                         }
-
-                        return Settings.FilterVariables;
+                        else
+                        {
+                            return Settings.FilterVariables;
+                        }
                     });
                 }
 
-                string regionFilter = Settings.FilterRegion && State.Run.Metadata.Region != null ? State.Run.Metadata.Region.ID : null;
-                string platformFilter = Settings.FilterPlatform && State.Run.Metadata.Platform != null ? State.Run.Metadata.Platform.ID : null;
-                EmulatorsFilter emulatorFilter = EmulatorsFilter.NotSet;
-                if (Settings.FilterPlatform)
+                // Set regionFilter
+                string regionFilter = Settings.FilterRegion && (State.Run.Metadata.Region != null) ? State.Run.Metadata.Region.ID : null;
+
+                // Set platformfilter
+                string platformFilter = Settings.FilterPlatform && (State.Run.Metadata.Platform != null) ? State.Run.Metadata.Platform.ID : null;
+
+                // Set emulatorFilter
+                /* EmulatorsFilter emulatorFilter = EmulatorsFilter.NotSet; */
+                EmulatorsFilter emulatorFilter = EmulatorsFilter.NoEmulators;
+                if (Settings.FilterPlatform && State.Run.Metadata.UsesEmulator)
+                {
+                    emulatorFilter = EmulatorsFilter.OnlyEmulators;
+                }
+
+                /* if (Settings.FilterPlatform)
                 {
                     if (State.Run.Metadata.UsesEmulator)
                     {
@@ -119,29 +139,48 @@ public class WorldRecordComponent : IComponent
                     {
                         emulatorFilter = EmulatorsFilter.NoEmulators;
                     }
-                }
+                } */
 
+                // Set timingMethodFilter
                 SpeedrunComSharp.TimingMethod? timingMethodFilter = GetTimingMethodOverride();
 
-                Leaderboard leaderboard = Client.Leaderboards.GetLeaderboardForFullGameCategory(State.Run.Metadata.Game.ID, State.Run.Metadata.Category.ID,
-                    top: 1,
-                    platformId: platformFilter, regionId: regionFilter,
-                    emulatorsFilter: emulatorFilter, variableFilters: variableFilter, orderBy: timingMethodFilter);
+                Leaderboard leaderboard =
+                    Client.Leaderboards.GetLeaderboardForFullGameCategory(
+                        State.Run.Metadata.Game.ID,
+                        State.Run.Metadata.Category.ID,
+                        top: 1,
+                        platformId: platformFilter, regionId: regionFilter,
+                        emulatorsFilter: emulatorFilter, variableFilters: variableFilter, orderBy: timingMethodFilter);
 
                 if (leaderboard != null)
                 {
-                    WorldRecord = leaderboard.Records.FirstOrDefault();
+                    WorldRecord = leaderboard.Records.First();
                     AllTies = leaderboard.Records;
                 }
+                else
+                {
+                    throw new Exception("Leaderboard is null");
+                }
+
+                Log.Info(leaderboard.Game.ToString() + " <- recognized game");
+
+                /* WorldRecord = Client.Leaderboards.GetLeaderboardForFullGameCategory(
+                        State.Run.Metadata.Game.ID,
+                        State.Run.Metadata.Category.ID,
+                        top: 1,
+                        platformId: platformFilter, regionId: regionFilter,
+                        emulatorsFilter: emulatorFilter, variableFilters: variableFilter, orderBy: timingMethodFilter).Records.First(); */
             }
         }
         catch (Exception ex)
         {
             Log.Error(ex);
         }
-
-        IsLoading = false;
-        ShowWorldRecord(State.Layout.Mode);
+        finally
+        {
+            IsLoading = false;
+            ShowWorldRecord(State.Layout.Mode);
+        }
     }
 
     private void ShowWorldRecord(LayoutMode mode)
@@ -188,7 +227,7 @@ public class WorldRecordComponent : IComponent
             }
 
             if (centeredText)
-            {
+            { // When text is centered
                 var textList = new List<string>
                 {
                     string.Format("World Record is {0} by {1}", formatted, runners),
@@ -209,7 +248,7 @@ public class WorldRecordComponent : IComponent
                 InternalComponent.AlternateNameText = textList;
             }
             else
-            {
+            { // When text is not centered
                 if (tieCount > 1)
                 {
                     InternalComponent.InformationValue = string.Format("{0} ({1}-way tie)", formatted, tieCount);
@@ -252,13 +291,14 @@ public class WorldRecordComponent : IComponent
         {
             return false;
         }
-
-        if (showMillis)
+        else if (showMillis)
         {
             return (int)pbTime.Value.TotalMilliseconds <= (int)recordTime.Value.TotalMilliseconds;
         }
-
-        return (int)pbTime.Value.TotalSeconds <= (int)recordTime.Value.TotalSeconds;
+        else
+        {
+            return (int)pbTime.Value.TotalSeconds <= (int)recordTime.Value.TotalSeconds;
+        }
     }
 
     private TimeSpan? GetPBTime(Model.TimingMethod method)
@@ -271,8 +311,10 @@ public class WorldRecordComponent : IComponent
         {
             return splitTime;
         }
-
-        return pbTime;
+        else
+        {
+            return pbTime;
+        }
     }
 
     private TimeSpan? GetWorldRecordTime(SpeedrunComSharp.TimingMethod? timingMethodOverride)
@@ -282,17 +324,19 @@ public class WorldRecordComponent : IComponent
             return WorldRecord.Times.RealTime;
         }
 
-        if (timingMethodOverride == SpeedrunComSharp.TimingMethod.RealTimeWithoutLoads)
+        else if (timingMethodOverride == SpeedrunComSharp.TimingMethod.RealTimeWithoutLoads)
         {
             return WorldRecord.Times.RealTimeWithoutLoads;
         }
 
-        if (timingMethodOverride == SpeedrunComSharp.TimingMethod.GameTime)
+        else if (timingMethodOverride == SpeedrunComSharp.TimingMethod.GameTime)
         {
             return WorldRecord.Times.GameTime;
         }
-
-        return WorldRecord.Times.Primary;
+        else
+        {
+            return WorldRecord.Times.Primary;
+        }
     }
 
     private SpeedrunComSharp.TimingMethod? GetTimingMethodOverride()
@@ -301,18 +345,18 @@ public class WorldRecordComponent : IComponent
         {
             return SpeedrunComSharp.TimingMethod.RealTime;
         }
-
-        if (Settings.TimingMethod == "Real Time Without Loads")
+        else if (Settings.TimingMethod == "Real Time Without Loads")
         {
             return SpeedrunComSharp.TimingMethod.RealTimeWithoutLoads;
         }
-
-        if (Settings.TimingMethod == "Game Time")
+        else if (Settings.TimingMethod == "Game Time")
         {
             return SpeedrunComSharp.TimingMethod.GameTime;
         }
-
-        return null;
+        else
+        {
+            return null;
+        }
     }
 
     public void Update(IInvalidator invalidator, LiveSplitState state, float width, float height, LayoutMode mode)
